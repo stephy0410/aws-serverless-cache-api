@@ -12,11 +12,11 @@ flowchart LR
     ALB -- "invoke (alias live)" --> L
 
     subgraph vpc["Default VPC · 3 AZs"]
-        L["Lambda<br/>Node.js 22 · arm64<br/>provisioned concurrency"]
-        subgraph ec["ElastiCache · Valkey 8"]
-            P["primary"] -. "replicación" .-> R["replica<br/>(otra AZ, failover automático)"]
+        L["Lambda<br/>Node.js 22 · arm64<br/>reserved concurrency 75"]
+        P["ElastiCache · Valkey 8<br/>cache.t3.micro (1 nodo)"]
+        subgraph priv["Subnets privadas (sin ruta a internet)"]
+            DB[("RDS PostgreSQL 16<br/>db.t3.micro<br/>products · reviews")]
         end
-        DB[("RDS PostgreSQL 16<br/>products · reviews")]
         L -- "1. GET key (TLS)" --> P
         L -- "2. miss → SELECT" --> DB
         L -- "3. SET key EX ttl" --> P
@@ -61,8 +61,28 @@ Implementadas en [`app/src/cache.js`](app/src/cache.js):
 | **Expiración sincronizada**: llaves llenadas juntas expiran juntas | TTL con *jitter* aleatorio: 300 s + 0–60 s. |
 | **Cache penetration**: ids que no existen siempre pasan a RDS | Se guarda también el "no existe" (`null`) con TTL corto (30 s). |
 | **Caché caída** | Fail-open: timeout de 250 ms por comando y fallback a RDS. |
-| **Demasiadas conexiones a RDS** al escalar Lambda | Pool de 1 conexión por ejecución, creada **perezosamente** (una Lambda que solo sirve HITs nunca abre conexión), y `reserved_concurrency = 60` como techo duro. |
-| **Cold starts** al llegar un pico | `provisioned concurrency = 10` en el alias `live`: entornos ya inicializados con el TLS a ElastiCache hecho. |
+| **Demasiadas conexiones a RDS** al escalar Lambda | Pool de 1 conexión por ejecución, creada **perezosamente** (una Lambda que solo sirve HITs nunca abre conexión), y `reserved_concurrency = 75` como techo duro: `db.t3.micro` acepta `max_connections = 81`, así que Lambda **nunca** puede agotar la BD. Lambda se dimensiona a la BD, no al revés. |
+| **Ráfaga de cold starts** al llegar un pico | Lo ideal es *provisioned concurrency*, pero AWS Academy lo bloquea con una SCP (`lambda:PutProvisionedConcurrencyConfig` denegado; la variable existe y queda en 0). En su lugar, la prueba de carga hace un *warm-up* en rampa para que Lambda cree entornos de a pocos. |
+
+## Costo y decisiones de presupuesto
+
+La cuenta de AWS Academy tiene **USD 50** de crédito, así que cada pieza se eligió por lo que aporta por dólar (precios on-demand us-east-1):
+
+| Recurso | USD/hora | USD/día encendido |
+|---|---|---|
+| ALB | ~0.025 | ~0.60 |
+| ElastiCache `cache.t3.micro` × 1 | 0.017 | 0.41 |
+| RDS `db.t3.micro` Single-AZ, 20 GB gp3 | ~0.018 | ~0.43 |
+| Lambda + CloudWatch Logs + prueba de carga completa (~250 k peticiones) | — | centavos |
+| **Total** | **~0.06** | **~1.45** |
+
+Decisiones:
+
+- **La caché es la que escala, no la base de datos.** En lugar de subir RDS a `db.t3.small` (+USD 0.40/día) para aguantar más conexiones, se mantiene `db.t3.micro` y la caché absorbe la mayoría de las lecturas. Ese es justamente el objetivo del lab.
+- **Sin réplica de caché** (−USD 0.41/día, ~22 % del total). La caché solo guarda datos que se pueden recalcular y la Lambda cae a RDS si falla (*fail-open*), así que una réplica duplicaría el costo sin proteger ningún dato.
+- **Sin RDS Multi-AZ, NAT Gateway, RDS Proxy ni VPC endpoints.** Cada uno costaría más que toda la arquitectura junta (un NAT Gateway solo cuesta ~USD 1/día).
+- **wrk2 corre desde la laptop** (gratis), no desde una EC2 generadora de carga.
+- **`make destroy` al terminar.** Recrear todo toma ~15 min y cuesta centavos; dejarlo encendido consumiría los USD 50 en ~5 semanas.
 
 ## Endpoints
 
@@ -82,9 +102,9 @@ Datos: 10 000 productos en 8 categorías y 300 000 reseñas, sembrados por Terra
 | Pieza | Recurso Terraform | Qué hace |
 |---|---|---|
 | **ALB** | `aws_lb`, `aws_lb_listener` (80→301 a 443, 443 HTTPS), `aws_lb_target_group` (`target_type = "lambda"`) | Recibe HTTPS e invoca la Lambda por cada petición. |
-| **Lambda** | `aws_lambda_function`, `aws_lambda_alias`, `aws_lambda_provisioned_concurrency_config` | Node.js 22 en Graviton (arm64), dentro de la VPC, rol `LabRole` (Academy no permite crear roles IAM). |
-| **ElastiCache** | `aws_elasticache_replication_group` | Valkey 8, primario + réplica en otra AZ con failover automático, cifrado en tránsito y en reposo, `maxmemory-policy = allkeys-lru`. |
-| **RDS** | `aws_db_instance` | PostgreSQL 16, `db.t3.micro`, no público, cifrado; la Lambda verifica su certificado con el bundle de CA de RDS. |
+| **Lambda** | `aws_lambda_function`, `aws_lambda_alias` | Node.js 22 en Graviton (arm64, ~20 % más barato que x86), dentro de la VPC, rol `LabRole` (Academy no permite crear roles IAM). |
+| **ElastiCache** | `aws_elasticache_replication_group` | Valkey 8 (más barato que Redis OSS en ElastiCache), 1 nodo `cache.t3.micro`, cifrado en tránsito y en reposo, `maxmemory-policy = allkeys-lru`. `cache_replicas = 1` añade réplica Multi-AZ con failover si se quiere. |
+| **RDS** | `aws_db_instance` | PostgreSQL 16, `db.t3.micro`, Single-AZ, sin backups, no público, cifrado; la Lambda verifica su certificado con el bundle de CA de RDS. |
 | **Security Groups** | `aws_security_group` | Internet → ALB (80/443). ElastiCache (6379) y RDS (5432) solo aceptan tráfico del SG de la Lambda. |
 | **Cert self-signed + ACM** | `tls_private_key`, `tls_self_signed_cert`, `aws_acm_certificate` | HTTPS gratuito en el ALB (sin dominio en Academy → `curl -k`). |
 
@@ -94,7 +114,7 @@ Datos: 10 000 productos en 8 categorías y 300 000 reseñas, sembrados por Terra
 alb.tf            # Cert self-signed + ACM, ALB, listeners, target group de tipo lambda
 lambda.tf         # Lambda, alias, provisioned concurrency, invocación de seed
 data_stores.tf    # RDS PostgreSQL y ElastiCache (Valkey) + subnet/parameter groups
-network.tf        # VPC/subnets por defecto (sin use1-az3, que Lambda no soporta) y security groups
+network.tf        # VPC/subnets públicas por defecto (ALB, Lambda, ElastiCache; sin use1-az3), subnets privadas para RDS y security groups
 variables.tf      # Parámetros (TTL, tamaños, concurrencia, datos de seed...)
 outputs.tf        # URL, endpoints y comandos listos para copiar
 versions.tf       # Providers + backend remoto S3 (key lab04/terraform.tfstate)

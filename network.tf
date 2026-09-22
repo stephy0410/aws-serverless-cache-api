@@ -26,6 +26,39 @@ locals {
   subnet_ids = sort(data.aws_subnets.selected.ids)
 }
 
+# --- Private subnets: RDS only ---
+# The default subnets are public (the main route table sends 0.0.0.0/0 to the IGW),
+# so the database gets its own subnets with a route table that has only the local
+# VPC route. The Lambda still reaches it through that local route.
+
+resource "aws_route_table" "private" {
+  vpc_id = data.aws_vpc.default.id
+
+  tags = {
+    Name = "${var.name}-private-rt"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count = length(var.availability_zone_ids)
+
+  vpc_id                  = data.aws_vpc.default.id
+  availability_zone_id    = var.availability_zone_ids[count.index]
+  cidr_block              = var.private_subnet_cidrs[count.index]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "${var.name}-private-${var.availability_zone_ids[count.index]}"
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  count = length(aws_subnet.private)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
 # --- Security groups ---
 # Traffic can only flow: internet -> ALB -> Lambda -> (ElastiCache | RDS).
 # Neither data store is reachable from anything except the Lambda's ENIs.

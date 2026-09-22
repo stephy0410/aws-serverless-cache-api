@@ -88,10 +88,14 @@ resource "aws_lambda_provisioned_concurrency_config" "live" {
 }
 
 # One-off schema creation + seed data. Idempotent, so re-running it is harmless;
-# Terraform re-invokes it only if the input changes.
+# Terraform re-invokes it only if the input changes or the database is replaced.
 resource "aws_lambda_invocation" "seed" {
   function_name = aws_lambda_function.api.function_name
   qualifier     = aws_lambda_alias.live.name
+
+  triggers = {
+    db_instance = aws_db_instance.this.resource_id
+  }
 
   input = jsonencode({
     action   = "seed"

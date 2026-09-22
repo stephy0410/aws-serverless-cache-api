@@ -7,6 +7,7 @@
 //   PUT  /products/{id}  {price,stock}  update in RDS, invalidate cached keys
 //   GET  /db/products/{id}              same as /products/{id} but never cached (benchmark baseline)
 //   GET  /stats                         cache hit ratio from ElastiCache
+import { STATUS_CODES } from 'node:http';
 import { cacheAside, cacheStats, invalidate } from './cache.js';
 import { CATEGORIES, getProduct, getTopRated, seed, updateProduct } from './db.js';
 
@@ -16,7 +17,7 @@ const topKey = (category) => `top:${category}`;
 function respond(statusCode, body, headers = {}) {
   return {
     statusCode,
-    statusDescription: `${statusCode}`,
+    statusDescription: `${statusCode} ${STATUS_CODES[statusCode]}`, // ALB requires e.g. "200 OK"
     isBase64Encoded: false,
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),

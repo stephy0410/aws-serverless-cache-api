@@ -22,6 +22,12 @@ variable "availability_zone_ids" {
   default     = ["use1-az1", "use1-az2", "use1-az4"]
 }
 
+variable "private_subnet_cidrs" {
+  description = "CIDRs of the private RDS subnets, one per entry in availability_zone_ids. Must be free space in the default VPC (172.31.0.0/16; the default subnets use 172.31.0.0-95.255)."
+  type        = list(string)
+  default     = ["172.31.100.0/24", "172.31.101.0/24", "172.31.102.0/24"]
+}
+
 # --- Lambda ---
 
 variable "lambda_memory_mb" {
@@ -37,15 +43,15 @@ variable "lambda_timeout_seconds" {
 }
 
 variable "lambda_reserved_concurrency" {
-  description = "Max concurrent Lambda executions. Each execution holds at most one Postgres connection, so this caps DB connections below the RDS max_connections."
+  description = "Max concurrent Lambda executions. Each execution holds at most one Postgres connection, so this stays below the RDS max_connections (81 on db.t3.micro, a few reserved by RDS). Lambda is sized to the database, not the other way around."
   type        = number
-  default     = 60
+  default     = 75
 }
 
 variable "lambda_provisioned_concurrency" {
-  description = "Pre-initialized (warm) Lambda environments on the live alias. Avoids cold starts at the start of a load test. 0 disables it."
+  description = "Pre-initialized (warm) Lambda environments on the live alias. Avoids cold starts at the start of a load test. 0 disables it. AWS Academy Learner Lab denies lambda:PutProvisionedConcurrencyConfig via SCP, so keep 0 there."
   type        = number
-  default     = 10
+  default     = 0
 }
 
 # --- Cache ---
@@ -57,9 +63,9 @@ variable "cache_node_type" {
 }
 
 variable "cache_replicas" {
-  description = "Read replicas in addition to the primary. With >= 1, Multi-AZ automatic failover is turned on."
+  description = "Read replicas in addition to the primary. With >= 1, Multi-AZ automatic failover is turned on. Default 0: the cache holds only re-derivable data and the Lambda fails open to RDS, so a replica would double the cache cost for little benefit."
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "cache_ttl_seconds" {

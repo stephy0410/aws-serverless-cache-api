@@ -112,7 +112,8 @@ export async function seed({ products, reviews }) {
     }
     await client.query('ANALYZE products; ANALYZE reviews;');
     const { rows: [counts] } = await client.query(
-      'SELECT (SELECT count(*) FROM products)::int AS products, (SELECT count(*) FROM reviews)::int AS reviews',
+      `SELECT (SELECT count(*) FROM products)::int AS products, (SELECT count(*) FROM reviews)::int AS reviews,
+              current_setting('max_connections')::int AS max_connections`,
     );
     return counts;
   } finally {

@@ -6,11 +6,15 @@ resource "random_password" "db" {
 }
 
 resource "aws_db_subnet_group" "this" {
-  name       = "${var.name}-db-subnets"
-  subnet_ids = local.subnet_ids
+  name       = "${var.name}-db-private"
+  subnet_ids = aws_subnet.private[*].id
 
   tags = {
-    Name = "${var.name}-db-subnets"
+    Name = "${var.name}-db-private"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
