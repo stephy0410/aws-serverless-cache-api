@@ -1,0 +1,16 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+crash.*.log
+.DS_Store
+
+# Lambda build output (produced by `make build`)
+app/node_modules/
+app/rds-ca.pem
+build/
+
+# wrk2 source checkout / binary (produced by `make wrk2`)
+loadtest/.wrk2/
+tfplan

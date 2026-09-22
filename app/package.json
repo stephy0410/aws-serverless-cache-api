@@ -1,0 +1,14 @@
+{
+  "name": "catalog-api",
+  "version": "1.0.0",
+  "description": "Lambda behind an ALB: cache-aside reads through ElastiCache (Valkey) in front of RDS PostgreSQL",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.2",
+    "pg": "^8.13.1"
+  }
+}
