@@ -6,10 +6,17 @@
 //   GET  /products/top?category=books   top 10 rated in category (cache-aside)
 //   PUT  /products/{id}  {price,stock}  update in RDS, invalidate cached keys
 //   GET  /db/products/{id}              same as /products/{id} but never cached (benchmark baseline)
+//   GET  /db/products/top?category=…    same as /products/top but never cached
 //   GET  /stats                         cache hit ratio from ElastiCache
+//   GET  /                              HTML page that drives the endpoints above from a browser
+//
+// Explicit aliases: /cache/products/… is /products/… and /nocache/products/… is /db/products/….
+import { readFileSync } from 'node:fs';
 import { STATUS_CODES } from 'node:http';
 import { cacheAside, cacheStats, invalidate } from './cache.js';
 import { CATEGORIES, getProduct, getTopRated, seed, updateProduct } from './db.js';
+
+const UI_HTML = readFileSync(new URL('./ui.html', import.meta.url), 'utf8');
 
 const productKey = (id) => `product:${id}`;
 const topKey = (category) => `top:${category}`;
@@ -29,24 +36,48 @@ function parseId(raw) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function parseCategory(event) {
+  const category = decodeURIComponent(event.queryStringParameters?.category ?? '');
+  return CATEGORIES.includes(category) ? category : null;
+}
+
+const badCategory = () => respond(400, { error: `category must be one of: ${CATEGORIES.join(', ')}` });
+
 function parseBody(event) {
   if (!event.body) return {};
   const text = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
   return JSON.parse(text);
 }
 
-async function route(method, path, event) {
-  if (method === 'GET' && path === '/health') return respond(200, { status: 'ok' });
+async function route(method, rawPath, event) {
+  if (method === 'GET' && rawPath === '/health') return respond(200, { status: 'ok' });
+
+  const path = rawPath.replace(/^\/cache(?=\/products\/)/, '').replace(/^\/nocache(?=\/products\/)/, '/db');
+
+  if (method === 'GET' && path === '/') {
+    return {
+      statusCode: 200,
+      statusDescription: '200 OK',
+      isBase64Encoded: false,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      body: UI_HTML,
+    };
+  }
 
   if (method === 'GET' && path === '/stats') return respond(200, await cacheStats());
 
   if (method === 'GET' && path === '/products/top') {
-    const category = decodeURIComponent(event.queryStringParameters?.category ?? '');
-    if (!CATEGORIES.includes(category)) {
-      return respond(400, { error: `category must be one of: ${CATEGORIES.join(', ')}` });
-    }
+    const category = parseCategory(event);
+    if (!category) return badCategory();
     const { data, cache } = await cacheAside(topKey(category), () => getTopRated(category));
     return respond(data ? 200 : 404, data ?? { error: 'not found' }, { 'X-Cache': cache });
+  }
+
+  if (method === 'GET' && path === '/db/products/top') {
+    const category = parseCategory(event);
+    if (!category) return badCategory();
+    const data = await getTopRated(category);
+    return respond(data ? 200 : 404, data ?? { error: 'not found' }, { 'X-Cache': 'BYPASS' });
   }
 
   let match = path.match(/^\/products\/([^/]+)$/);
@@ -96,10 +127,15 @@ export async function handler(event) {
     return { seeded: true, ...counts };
   }
 
+  const start = performance.now();
+  let res;
   try {
-    return await route(event.httpMethod, event.path, event);
+    res = await route(event.httpMethod, event.path, event);
   } catch (err) {
     console.error('request failed:', err);
-    return respond(500, { error: 'internal error' });
+    res = respond(500, { error: 'internal error' });
   }
+  // Time spent inside the Lambda, so the page can show cache vs database without internet latency.
+  res.headers['X-Duration-Ms'] = (performance.now() - start).toFixed(1);
+  return res;
 }

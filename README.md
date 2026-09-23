@@ -93,7 +93,11 @@ Decisiones:
 | GET | `/products/top?category=books` | Top 10 mejor calificados de la categoría (agregación pesada, cache-aside). |
 | PUT | `/products/{id}` | Body `{"price": 19.99, "stock": 5}`. Escribe en RDS e invalida la caché. |
 | GET | `/db/products/{id}` | Igual que `/products/{id}` pero **siempre** va a RDS. Es la línea base de la prueba de carga. |
+| GET | `/db/products/top?category=books` | Igual que `/products/top` pero **siempre** va a RDS (`X-Cache: BYPASS`). |
 | GET | `/stats` | `keyspace_hits`, `keyspace_misses` y *hit ratio* de ElastiCache. |
+| GET | `/` | Página web para probar los endpoints desde el navegador. |
+
+Alias con nombres explícitos: `/cache/products/…` equivale a `/products/…` y `/nocache/products/…` equivale a `/db/products/…`. Toda respuesta incluye `X-Duration-Ms`, el tiempo que tardó la Lambda por dentro.
 
 Datos: 10 000 productos en 8 categorías y 300 000 reseñas, sembrados por Terraform con una invocación única de la Lambda (`aws_lambda_invocation`).
 
@@ -145,13 +149,26 @@ Escenarios:
 1. **Sin caché**: todas las lecturas a RDS (`/db/products/{id}`).
 2. **Cache-aside**: el mismo tráfico por `/products/{id}`, empezando con la caché fría.
 3. **Mixto 95/5**: 5 % de `PUT` que invalidan llaves.
-4. **Escalonado**: 250 → 500 → 1000 → 1500 req/s para ver si la latencia se mantiene plana.
+4. **Escalonado**: 25 → 50 → 100 req/s para ver si la latencia se mantiene plana.
+5. **Consulta pesada sin caché**: `/db/products/top` (agrega las 300 000 reseñas, ~48 ms en RDS).
+6. **Consulta pesada con caché**: `/products/top` (~2 ms desde la caché).
+
+`ONLY=top make loadtest` corre solo los escenarios 5 y 6. Además de `Requests/sec` (que wrk2 mantiene fijo y que incluye errores), el script reporta `Successful req/s`.
+
+> **Tasas bajas a propósito.** AWS Academy desactivó la cuenta del Learner Lab mientras corría la suite a hasta 1000 req/s, así que los valores por defecto bajaron (100 req/s base, 50 req/s en la consulta pesada, 50 conexiones). A 50 req/s la consulta pesada sin caché ya satura RDS, que solo calcula ~18 por segundo.
 
 > **wrk2 en Apple Silicon:** el repo original trae LuaJIT 2.0 e incluye `<x86intrin.h>`, así que no compila en arm64. [`loadtest/build-wrk2.sh`](loadtest/build-wrk2.sh) lo enlaza contra LuaJIT 2.1 y OpenSSL de Homebrew y quita ese header (no se usa). En Linux x86_64 compila tal cual.
 
 ### Resultados
 
-RESULTS_PLACEHOLDER
+Consulta pesada, 300 req/s durante 60 s (corrida `20260922-184451`, antes de bajar las tasas):
+
+| Escenario | Requests/sec | Successful req/s | Errores | p90 | p99 |
+|---|---|---|---|---|---|
+| Sin caché | 284.5 | **17.8** | 93.7 % | 10.4 s | 20.0 s |
+| Con caché | 297.0 | **276.2** | 7.0 % | 102.9 ms | 132.2 ms |
+
+Con caché la API atiende ~15× más peticiones exitosas. Los resultados completos de cada corrida están en [`loadtest/results/`](loadtest/results/).
 
 ## Trade-offs reconocidos
 

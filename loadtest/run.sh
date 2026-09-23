@@ -6,7 +6,8 @@
 # omission, so the latency percentiles reflect what users would actually see.
 #
 # Usage: loadtest/run.sh https://<alb-dns>
-#   RATE=500 DURATION=60s CONNECTIONS=200 THREADS=4 STEPS="250 500 750 1000" loadtest/run.sh ...
+#   RATE=100 DURATION=30s CONNECTIONS=50 THREADS=2 STEPS="25 50 100" loadtest/run.sh ...
+#   ONLY=top TOP_RATE=50 loadtest/run.sh ...   (just the heavy-query comparison)
 set -euo pipefail
 
 URL="${1:?usage: $0 https://<alb-dns>}"
@@ -14,14 +15,17 @@ URL="${URL%/}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WRK="$HERE/.wrk2/wrk"
 
-RATE="${RATE:-500}"
-DURATION="${DURATION:-60s}"
-# Over a ~100 ms internet round trip, each connection sustains ~10 req/s, so the
-# highest step needs a few hundred connections (and more file descriptors than macOS's default 256).
-CONNECTIONS="${CONNECTIONS:-200}"
-THREADS="${THREADS:-4}"
-STEPS="${STEPS:-250 500 750 1000}"
-STEP_DURATION="${STEP_DURATION:-30s}"
+RATE="${RATE:-100}"
+DURATION="${DURATION:-30s}"
+# Rates are kept low on purpose: AWS Academy deactivated the account during a run at up to
+# 1000 req/s. Over a ~100 ms round trip each connection sustains ~10 req/s, so 50 is plenty here.
+CONNECTIONS="${CONNECTIONS:-50}"
+THREADS="${THREADS:-2}"
+STEPS="${STEPS:-25 50 100}"
+STEP_DURATION="${STEP_DURATION:-20s}"
+TOP_RATE="${TOP_RATE:-50}"
+# ONLY=top runs just the heavy-query comparison (scenarios 5-6).
+ONLY="${ONLY:-}"
 
 ulimit -n 4096 2>/dev/null || true
 
@@ -45,24 +49,32 @@ curl -skf "$URL/health" >/dev/null || { echo "API not healthy at $URL/health" >&
 #    ramp the rate gradually: Lambda creates execution environments a few at a time
 #    instead of a burst of cold starts all at once, which would hit reserved concurrency and throttle.
 echo "=== warm-up: ramping Lambda execution environments ==="
-for rate in 50 150 300 500; do
+for rate in 10 25 50 100; do
   "$WRK" -t"$THREADS" -c"$CONNECTIONS" -d10s -R"$rate" "$URL/health" >/dev/null
 done
 echo
 
-# 1. Every read goes to RDS: the baseline.
-run 1-no-cache "$RATE" "$DURATION" PATH_PREFIX=/db/products
+if [[ "$ONLY" != "top" ]]; then
+  # 1. Every read goes to RDS: the baseline.
+  run 1-no-cache "$RATE" "$DURATION" PATH_PREFIX=/db/products
 
-# 2. Same traffic through cache-aside (starts cold if the last run was > TTL ago, so it includes the fill-up misses).
-run 2-cache-aside "$RATE" "$DURATION" PATH_PREFIX=/products
+  # 2. Same traffic through cache-aside (starts cold if the last run was > TTL ago, so it includes the fill-up misses).
+  run 2-cache-aside "$RATE" "$DURATION" PATH_PREFIX=/products
 
-# 3. 95% reads / 5% writes: every write invalidates a key that is then re-read from RDS.
-run 3-mixed-95r-5w "$RATE" "$DURATION" PATH_PREFIX=/products WRITE_RATIO=0.05
+  # 3. 95% reads / 5% writes: every write invalidates a key that is then re-read from RDS.
+  run 3-mixed-95r-5w "$RATE" "$DURATION" PATH_PREFIX=/products WRITE_RATIO=0.05
 
-# 4. Step test: raise the rate and check that latency stays flat.
-for step in $STEPS; do
-  run "4-step-${step}rps" "$step" "$STEP_DURATION" PATH_PREFIX=/products
-done
+  # 4. Step test: raise the rate and check that latency stays flat.
+  for step in $STEPS; do
+    run "4-step-${step}rps" "$step" "$STEP_DURATION" PATH_PREFIX=/products
+  done
+fi
+
+# 5-6. The heavy query (top 10 per category aggregates every review, ~50 ms in RDS vs ~2 ms
+#      from the cache). A single product lookup is too cheap to ever make the database the
+#      bottleneck; this one does, so it is where the cache makes the difference in capacity.
+run 5-top-no-cache "$TOP_RATE" "$DURATION" PATH_PREFIX=/db/products MODE=top
+run 6-top-cache "$TOP_RATE" "$DURATION" PATH_PREFIX=/products MODE=top
 
 curl -sk "$URL/stats" | tee "$OUT/cache-stats.json"
 echo

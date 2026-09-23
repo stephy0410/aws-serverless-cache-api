@@ -20,16 +20,14 @@ terraform {
     }
   }
 
-  # Remote state in the same pre-existing S3 bucket used by the previous labs, under its own key.
+  # Remote state in a pre-existing S3 bucket (create it once: aws s3 mb s3://stephanie-borrego-sd-lab04).
   # Native S3 locking (use_lockfile) instead of a DynamoDB table.
-  # Path-style addressing avoids TLS issues with the dot in the bucket name.
   backend "s3" {
-    bucket         = "stephanie.borrego"
-    key            = "lab04/terraform.tfstate"
-    region         = "us-east-1"
-    profile        = "academy"
-    encrypt        = true
-    use_lockfile   = true
-    use_path_style = true
+    bucket       = "stephanie-borrego-sd-lab04"
+    key          = "lab04/terraform.tfstate"
+    region       = "us-east-1"
+    profile      = "academy"
+    encrypt      = true
+    use_lockfile = true
   }
 }

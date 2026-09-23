@@ -6,6 +6,8 @@
 --
 -- Environment variables:
 --   PATH_PREFIX  /products (cache-aside, default) or /db/products (no cache)
+--   MODE         product (default): GET <prefix>/{id}
+--                top: GET <prefix>/top?category=… (heavy aggregation over every review)
 --   MAX_ID       10000
 --   HOT_IDS      2000
 --   HOT_SHARE    0.8
@@ -16,6 +18,8 @@ local max_id      = tonumber(os.getenv("MAX_ID") or "10000")
 local hot_ids     = tonumber(os.getenv("HOT_IDS") or "2000")
 local hot_share   = tonumber(os.getenv("HOT_SHARE") or "0.8")
 local write_ratio = tonumber(os.getenv("WRITE_RATIO") or "0")
+local mode        = os.getenv("MODE") or "product"
+local categories  = { "electronics", "books", "home", "toys", "sports", "beauty", "garden", "grocery" }
 
 local threads = {}
 local counter = 0
@@ -39,6 +43,9 @@ local function pick_id()
 end
 
 function request()
+  if mode == "top" then
+    return wrk.format("GET", prefix .. "/top?category=" .. categories[math.random(#categories)])
+  end
   local id = pick_id()
   if math.random() < write_ratio then
     local body = string.format('{"price": %.2f}', 5 + math.random() * 495)
@@ -78,6 +85,11 @@ function done(summary, latency, requests)
   if h + m > 0 then
     io.write(string.format("Cache hit ratio: %.2f%%\n", 100 * h / (h + m)))
   end
+  -- wrk2's Requests/sec counts every response, errors included; this counts only the useful ones.
+  local seconds = summary.duration / 1e6
+  local ok = h + m + b + w
+  io.write(string.format("Successful req/s: %.2f  (%.1f%% of %d responses were errors)\n",
+    ok / seconds, 100 * e / math.max(summary.requests, 1), summary.requests))
   io.write(string.format("Socket errors: connect=%d read=%d write=%d timeout=%d\n",
     summary.errors.connect, summary.errors.read, summary.errors.write, summary.errors.timeout))
   for _, p in ipairs({ 50, 90, 99, 99.9 }) do

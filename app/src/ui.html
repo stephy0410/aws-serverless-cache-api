@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catálogo con caché</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --border: #e3e7ec;
+    --accent: #2f6fde; --accent-text: #ffffff;
+    --hit-bg: #e3f6ea; --hit: #1c7c43; --miss-bg: #fdf0dc; --miss: #9a5b00;
+    --bypass-bg: #eceaf9; --bypass: #5a4bb5; --err-bg: #fde6e6; --err: #b42323;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --card: #1a1f25; --text: #e7ebf0; --muted: #98a3b1; --border: #2b323b;
+      --accent: #5b91f0; --accent-text: #0d1117;
+      --hit-bg: #15301f; --hit: #6fd59a; --miss-bg: #342710; --miss: #f0b75c;
+      --bypass-bg: #242042; --bypass: #b3a8f5; --err-bg: #3a1717; --err: #f28b8b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 24px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .tile { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile .label { color: var(--muted); font-size: .8rem; }
+  .tile .value { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .head h2 { margin: 0; }
+  input, select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 0;
+  }
+  input[type=number] { width: 120px; }
+  button {
+    font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .6; cursor: default; }
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: .8rem; font-weight: 600; letter-spacing: .02em;
+  }
+  .HIT { background: var(--hit-bg); color: var(--hit); }
+  .MISS { background: var(--miss-bg); color: var(--miss); }
+  .BYPASS { background: var(--bypass-bg); color: var(--bypass); }
+  .ERR { background: var(--err-bg); color: var(--err); }
+  .product { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .product h3 { margin: 0 0 4px; font-size: 1.2rem; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 12px; }
+  .facts div span { display: block; color: var(--muted); font-size: .8rem; }
+  .timing { color: var(--muted); font-size: .9rem; margin-top: 12px; }
+  .timing b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: .85rem; }
+  td.num, th.num { text-align: right; }
+  .note { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; }
+  .empty { color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Catálogo con caché</h1>
+  <p class="lead">ALB → Lambda → ElastiCache (caché) → RDS PostgreSQL. Consulta un producto dos veces: la primera vez sale de la base de datos (MISS) y la segunda de la caché (HIT).</p>
+
+  <section class="card">
+    <div class="head">
+      <h2>Estado de la caché</h2>
+      <button id="refresh-stats">Actualizar</button>
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="label">Porcentaje de acierto</div><div class="value" id="s-ratio">—</div></div>
+      <div class="tile"><div class="label">Aciertos (HIT)</div><div class="value" id="s-hits">—</div></div>
+      <div class="tile"><div class="label">Fallos (MISS)</div><div class="value" id="s-misses">—</div></div>
+      <div class="tile"><div class="label">Llaves guardadas</div><div class="value" id="s-keys">—</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Buscar producto</h2>
+    <form class="row" id="lookup">
+      <input type="number" id="pid" min="1" max="10000" value="42" aria-label="ID del producto">
+      <button class="primary" type="submit" data-mode="cache">Con caché</button>
+      <button type="button" id="direct">Directo a RDS</button>
+      <button type="button" id="random">Aleatorio</button>
+    </form>
+    <p class="note">IDs del 1 al 10,000. "Directo a RDS" se salta la caché para comparar.</p>
+    <div id="product"></div>
+  </section>
+
+  <section class="card">
+    <h2>Historial de peticiones</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Ruta</th><th>Origen</th><th class="num">Tiempo en el servidor</th><th class="num">Tiempo total</th></tr></thead>
+        <tbody id="history"><tr><td colspan="4" class="empty">Todavía no hay peticiones.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="note">"Tiempo en el servidor" es lo que tardó la Lambda. "Tiempo total" incluye el viaje por internet desde tu navegador.</p>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Mejor calificados</h2>
+      <form class="row" id="top">
+        <select id="category" aria-label="Categoría">
+          <option value="books">Libros</option>
+          <option value="electronics">Electrónica</option>
+          <option value="home">Hogar</option>
+          <option value="toys">Juguetes</option>
+          <option value="sports">Deportes</option>
+          <option value="beauty">Belleza</option>
+          <option value="garden">Jardín</option>
+          <option value="grocery">Despensa</option>
+        </select>
+        <button class="primary" type="submit">Con caché</button>
+        <button type="button" id="top-direct">Directo a RDS</button>
+      </form>
+      <p class="note">Es la consulta más pesada: agrupa las 300,000 reseñas. Aquí se nota más la diferencia.</p>
+      <div id="top-result"></div>
+    </section>
+
+    <section class="card">
+      <h2>Editar producto</h2>
+      <form id="edit">
+        <div class="row">
+          <input type="number" id="e-id" min="1" max="10000" value="42" aria-label="ID">
+          <input type="number" id="e-price" min="0" step="0.01" placeholder="Precio" aria-label="Precio">
+          <input type="number" id="e-stock" min="0" step="1" placeholder="Stock" aria-label="Stock">
+          <button class="primary" type="submit">Guardar</button>
+        </div>
+      </form>
+      <p class="note">Guarda en RDS y borra el producto de la caché. La siguiente consulta será MISS y traerá el valor nuevo.</p>
+      <div id="edit-result"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = new Intl.NumberFormat('es-MX');
+const money = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'USD' });
+const history = [];
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const c of children) node.append(c);
+  return node;
+}
+
+async function call(path, options) {
+  const t0 = performance.now();
+  const res = await fetch(path, options);
+  const total = performance.now() - t0;
+  let body = null;
+  try { body = await res.json(); } catch {}
+  return {
+    ok: res.ok, status: res.status, body,
+    cache: res.headers.get('X-Cache'),
+    server: Number(res.headers.get('X-Duration-Ms')),
+    total,
+  };
+}
+
+function badge(r) {
+  const label = r.ok ? (r.cache || '—') : `Error ${r.status}`;
+  return el('span', { className: `badge ${r.ok ? (r.cache || '') : 'ERR'}`, textContent: label });
+}
+
+function ms(v) { return Number.isFinite(v) && v > 0 ? `${v.toFixed(1)} ms` : '—'; }
+
+function record(path, r) {
+  history.unshift({ path, r });
+  history.length = Math.min(history.length, 10);
+  const tbody = $('history');
+  tbody.replaceChildren(...history.map(({ path, r }) => el('tr', {},
+    el('td', { textContent: path }),
+    el('td', {}, badge(r)),
+    el('td', { className: 'num', textContent: ms(r.server) }),
+    el('td', { className: 'num', textContent: ms(r.total) }),
+  )));
+}
+
+async function loadStats() {
+  const r = await call('/stats');
+  if (!r.ok || !r.body) return;
+  const s = r.body;
+  $('s-ratio').textContent = s.hit_ratio == null ? '—' : `${(s.hit_ratio * 100).toFixed(1)} %`;
+  $('s-hits').textContent = fmt.format(s.keyspace_hits ?? 0);
+  $('s-misses').textContent = fmt.format(s.keyspace_misses ?? 0);
+  $('s-keys').textContent = fmt.format(s.keys ?? 0);
+}
+
+async function lookup(direct) {
+  const id = $('pid').value;
+  const path = direct ? `/nocache/products/${id}` : `/cache/products/${id}`;
+  const box = $('product');
+  box.replaceChildren(el('p', { className: 'note', textContent: 'Consultando…' }));
+  const r = await call(path);
+  record(path, r);
+  if (!r.ok) {
+    box.replaceChildren(el('div', { className: 'msg ERR', textContent: r.body?.error || `Error ${r.status}` }));
+  } else {
+    const p = r.body;
+    const explain = {
+      HIT: 'Salió de la caché: no se tocó la base de datos.',
+      MISS: 'No estaba en caché: se consultó RDS y se guardó para la próxima vez.',
+      BYPASS: 'Se consultó RDS directamente, sin usar la caché.',
+    }[r.cache] || '';
+    box.replaceChildren(el('div', { className: 'product' },
+      el('div', { className: 'row' }, el('h3', { textContent: p.name }), badge(r)),
+      el('div', { className: 'note', textContent: explain }),
+      el('div', { className: 'facts' },
+        el('div', {}, el('span', { textContent: 'Categoría' }), p.category),
+        el('div', {}, el('span', { textContent: 'Precio' }), money.format(p.price)),
+        el('div', {}, el('span', { textContent: 'Stock' }), fmt.format(p.stock)),
+        el('div', {}, el('span', { textContent: 'Calificación' }), p.avg_rating == null ? '—' : `${p.avg_rating} / 5`),
+        el('div', {}, el('span', { textContent: 'Reseñas' }), fmt.format(p.review_count)),
+      ),
+      el('div', { className: 'timing' },
+        'Servidor: ', el('b', { textContent: ms(r.server) }), ' · Total: ', el('b', { textContent: ms(r.total) })),
+    ));
+  }
+  loadStats();
+}
+
+async function loadTop(direct) {
+  const category = $('category').value;
+  const path = `${direct ? '/nocache' : '/cache'}/products/top?category=${encodeURIComponent(category)}`;
+  const box = $('top-result');
+  box.replaceChildren(el('p', { className: 'note', textContent: 'Consultando…' }));
+  const r = await call(path);
+  record(path, r);
+  if (!r.ok) {
+    box.replaceChildren(el('div', { className: 'msg ERR', textContent: r.body?.error || `Error ${r.status}` }));
+  } else {
+    box.replaceChildren(
+      el('p', { className: 'timing' }, badge(r), ' Servidor: ', el('b', { textContent: ms(r.server) })),
+      el('div', { className: 'table-wrap' }, el('table', {},
+        el('thead', {}, el('tr', {},
+          el('th', { textContent: 'Producto' }), el('th', { className: 'num', textContent: 'Calificación' }),
+          el('th', { className: 'num', textContent: 'Reseñas' }), el('th', { className: 'num', textContent: 'Precio' }))),
+        el('tbody', {}, ...r.body.products.map((p) => el('tr', {},
+          el('td', { textContent: p.name }),
+          el('td', { className: 'num', textContent: p.avg_rating }),
+          el('td', { className: 'num', textContent: fmt.format(p.review_count) }),
+          el('td', { className: 'num', textContent: money.format(p.price) }),
+        ))),
+      )),
+    );
+  }
+  loadStats();
+}
+
+async function save(e) {
+  e.preventDefault();
+  const id = $('e-id').value;
+  const body = {};
+  if ($('e-price').value !== '') body.price = Number($('e-price').value);
+  if ($('e-stock').value !== '') body.stock = Number($('e-stock').value);
+  const box = $('edit-result');
+  if (!Object.keys(body).length) {
+    box.replaceChildren(el('div', { className: 'msg ERR', textContent: 'Escribe un precio o un stock.' }));
+    return;
+  }
+  const path = `/products/${id}`;
+  const r = await call(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  record(`PUT ${path}`, r);
+  box.replaceChildren(r.ok
+    ? el('div', { className: 'msg HIT', textContent: `Producto ${id} actualizado y borrado de la caché. Búscalo arriba: saldrá MISS con el valor nuevo.` })
+    : el('div', { className: 'msg ERR', textContent: r.body?.error || `Error ${r.status}` }));
+  $('pid').value = id;
+  loadStats();
+}
+
+$('lookup').addEventListener('submit', (e) => { e.preventDefault(); lookup(false); });
+$('direct').addEventListener('click', () => lookup(true));
+$('random').addEventListener('click', () => { $('pid').value = 1 + Math.floor(Math.random() * 10000); lookup(false); });
+$('top').addEventListener('submit', (e) => { e.preventDefault(); loadTop(false); });
+$('top-direct').addEventListener('click', () => loadTop(true));
+$('edit').addEventListener('submit', save);
+$('refresh-stats').addEventListener('click', loadStats);
+loadStats();
+</script>
+</body>
+</html>
